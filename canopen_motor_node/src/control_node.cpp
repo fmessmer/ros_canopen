@@ -34,14 +34,18 @@ class MotorChain : public RosChain{
     boost::shared_ptr<RobotLayer> robot_layer_;
 
     boost::shared_ptr< ControllerManagerLayer> cm_;
+    urdf::Model urdf_;
+    bool has_urdf_;
 
     virtual bool nodeAdded(XmlRpc::XmlRpcValue &params, const boost::shared_ptr<canopen::Node> &node, const boost::shared_ptr<Logger> &logger)
     {
         std::string name = params["name"];
-        std::string &joint = name;
+        std::string joint = name;
         if(params.hasMember("joint")) joint.assign(params["joint"]);
 
-        if(!robot_layer_->getJoint(joint)){
+        boost::shared_ptr<const urdf::Joint> urdf_joint = urdf_.getJoint(joint);
+
+        if(!urdf_joint && has_urdf_){
             ROS_ERROR_STREAM("joint " + joint + " was not found in URDF");
             return false;
         }
@@ -73,6 +77,7 @@ class MotorChain : public RosChain{
         logger->add(motor);
 
         boost::shared_ptr<HandleLayer> handle( new HandleLayer(joint, motor, node->getStorage(), params));
+        ROS_INFO_STREAM("adding " << joint);
 
         canopen::LayerStatus s;
         if(!handle->prepareFilters(s)){
@@ -90,8 +95,11 @@ public:
     MotorChain(const ros::NodeHandle &nh, const ros::NodeHandle &nh_priv): RosChain(nh, nh_priv), motor_allocator_("canopen_402", "canopen::MotorBase::Allocator"){}
 
     virtual bool setup() {
+
+        if(!JointLimiter::Limits::parseURDF(nh_priv_, urdf_, &has_urdf_)) return false;
+
         motors_.reset( new LayerGroupNoDiag<MotorBase>("402 Layer"));
-        robot_layer_.reset( new RobotLayer(nh_));
+        robot_layer_.reset( new RobotLayer(nh_, urdf_));
 
         ros::Duration dur(0.0) ;
 

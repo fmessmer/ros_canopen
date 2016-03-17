@@ -2,10 +2,9 @@
 #ifndef CANOPEN_MOTOR_NODE_ROBOT_LAYER_H_
 #define CANOPEN_MOTOR_NODE_ROBOT_LAYER_H_
 
-#include <hardware_interface/joint_command_interface.h>
+#include <joint_limits_controller/limited_joint_handle.h>
 #include <hardware_interface/joint_state_interface.h>
 #include <hardware_interface/robot_hw.h>
-#include <joint_limits_interface/joint_limits_interface.h>
 #include <urdf/model.h>
 #include <canopen_402/base.h>
 #include <filters/filter_chain.h>
@@ -129,14 +128,19 @@ class HandleLayer: public canopen::Layer{
     XmlRpc::XmlRpcValue options_;
 
     hardware_interface::JointStateHandle jsh_;
-    hardware_interface::JointHandle jph_, jvh_, jeh_;
-    boost::atomic<hardware_interface::JointHandle*> jh_;
+    LimitedPositionJointHandle jph_;
+    LimitedVelocityJointHandle jvh_;
+    LimitedEffortJointHandle jeh_;
+
+    boost::atomic<LimitedJointHandle*> jh_;
     boost::atomic<bool> forward_command_;
 
-    typedef boost::unordered_map< canopen::MotorBase::OperationMode,hardware_interface::JointHandle* > CommandMap;
+    LimitedJointHandle::Limits limits_, overlay_limits_;
+
+    typedef boost::unordered_map< canopen::MotorBase::OperationMode,LimitedJointHandle* > CommandMap;
     CommandMap commands_;
 
-    template <typename T> hardware_interface::JointHandle* addHandle( T &iface, hardware_interface::JointHandle *jh,  const std::vector<canopen::MotorBase::OperationMode> & modes){
+    template <typename T> bool addHandle( T &iface, LimitedJointHandle *jh,  const std::vector<canopen::MotorBase::OperationMode> & modes){
 
         bool supported = false;
         for(size_t i=0; i < modes.size(); ++i){
@@ -145,14 +149,14 @@ class HandleLayer: public canopen::Layer{
                 break;
             }
         }
-        if(!supported) return 0;
+        if(!supported) return false;
 
         iface.registerHandle(*jh);
 
         for(size_t i=0; i < modes.size(); ++i){
             commands_[modes[i]] = jh;
         }
-        return jh;
+        return true;
     }
     bool select(const canopen::MotorBase::OperationMode &m);
     static double * assignVariable(const std::string &name, double * ptr, const std::string &req) { return name == req ? ptr : 0; }
@@ -169,15 +173,19 @@ public:
     CanSwitchResult canSwitch(const canopen::MotorBase::OperationMode &m);
     bool switchMode(const canopen::MotorBase::OperationMode &m);
     bool forwardForMode(const canopen::MotorBase::OperationMode &m);
+    void setOverlayLimits(const LimitedJointHandle::Limits & limits);
+
+    void enforceLimits(const ros::Duration &period, bool recover);
 
     void registerHandle(hardware_interface::JointStateInterface &iface){
         iface.registerHandle(jsh_);
     }
-    hardware_interface::JointHandle* registerHandle(hardware_interface::PositionJointInterface &iface);
-    hardware_interface::JointHandle* registerHandle(hardware_interface::VelocityJointInterface &iface);
-    hardware_interface::JointHandle* registerHandle(hardware_interface::EffortJointInterface &iface);
+    bool registerHandle(hardware_interface::PositionJointInterface &iface);
+    bool registerHandle(hardware_interface::VelocityJointInterface &iface);
+    bool registerHandle(hardware_interface::EffortJointInterface &iface);
 
     bool prepareFilters(canopen::LayerStatus &status);
+    const LimitedJointHandle::Limits & getLimits() const { return limits_; }
 
 private:
     virtual void handleRead(canopen::LayerStatus &status, const LayerState &current_state);
@@ -190,27 +198,23 @@ private:
 
 };
 
-
-
 class RobotLayer : public canopen::LayerGroupNoDiag<HandleLayer>, public hardware_interface::RobotHW{
     hardware_interface::JointStateInterface state_interface_;
     hardware_interface::PositionJointInterface pos_interface_;
     hardware_interface::VelocityJointInterface vel_interface_;
     hardware_interface::EffortJointInterface eff_interface_;
 
-    joint_limits_interface::PositionJointSoftLimitsInterface pos_soft_limits_interface_;
-    joint_limits_interface::PositionJointSaturationInterface pos_saturation_interface_;
-    joint_limits_interface::VelocityJointSoftLimitsInterface vel_soft_limits_interface_;
-    joint_limits_interface::VelocityJointSaturationInterface vel_saturation_interface_;
-    joint_limits_interface::EffortJointSoftLimitsInterface eff_soft_limits_interface_;
-    joint_limits_interface::EffortJointSaturationInterface eff_saturation_interface_;
-
     ros::NodeHandle nh_;
-    urdf::Model urdf_;
+    urdf::Model &urdf_;
 
     typedef boost::unordered_map< std::string, boost::shared_ptr<HandleLayer> > HandleMap;
     HandleMap handles_;
-    typedef std::vector<std::pair<boost::shared_ptr<HandleLayer>, canopen::MotorBase::OperationMode> >  SwitchContainer;
+    struct SwitchData{
+        boost::shared_ptr<HandleLayer> handle;
+        canopen::MotorBase::OperationMode mode;
+        LimitedJointHandle::Limits limits;
+    };
+    typedef std::vector<SwitchData>  SwitchContainer;
     typedef boost::unordered_map<std::string, SwitchContainer>  SwitchMap;
     SwitchMap switch_map_;
 
@@ -219,11 +223,10 @@ class RobotLayer : public canopen::LayerGroupNoDiag<HandleLayer>, public hardwar
     void stopControllers(const std::vector<std::string> controllers);
 public:
     void add(const std::string &name, boost::shared_ptr<HandleLayer> handle);
-    RobotLayer(ros::NodeHandle nh);
-    boost::shared_ptr<const urdf::Joint> getJoint(const std::string &n) const { return urdf_.getJoint(n); }
+    RobotLayer(ros::NodeHandle nh, urdf::Model &urdf);
 
     virtual void handleInit(canopen::LayerStatus &status);
-    void enforce(const ros::Duration &period, bool reset);
+    void enforceLimits(const ros::Duration &period, bool recover);
     virtual bool canSwitch(const std::list<hardware_interface::ControllerInfo> &start_list, const std::list<hardware_interface::ControllerInfo> &stop_list) const{
         // compile-time check for mode switching support in ros_control
         // if the following line fails, please upgrade to ros_control/contoller_manager 0.9.2 or newer
